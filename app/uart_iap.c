@@ -91,7 +91,6 @@ void uart0_rx_flush(void)
     __enable_irq();
 }
 
-
 void uart_iap_feed(uint8_t *data, uint16_t len)
 {
     if(uart_iap.sta_flag == IAP_FLAG_IDLE) {
