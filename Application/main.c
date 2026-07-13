@@ -89,7 +89,8 @@ int main(void)
              if(now-first_tick>1000) {
                  first_tick=now;
                  led_toggle();
-				printf("how it can\r\n");
+							 printf("\r\n");
+				printf("OK\r\n");
              }
 			 }
     }
