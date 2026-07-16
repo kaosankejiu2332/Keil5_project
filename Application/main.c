@@ -69,7 +69,7 @@ int main(void)
 
     SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
     while(1) {
-        if(urx.OUT != urx.IN) {
+        while(urx.OUT != urx.IN) {
             receive_len = urx.OUT->end - urx.OUT->start + 1;
             ptr = urx.OUT->start;
 
@@ -83,17 +83,24 @@ int main(void)
         }
 
         uart_iap_poll();
-			 if(uart_iap.sta_flag == IAP_FLAG_IDLE) {
-			
-			 now=get_tick();
-             if(now-first_tick>1000) {
-                 first_tick=now;
-                 led_toggle();
-							 printf("\r\n");
-				printf("OK\r\n");
-             }
-			 }
+        if(uart_iap.sta_flag == IAP_FLAG_IDLE)
+        {
+            now=get_tick();
+            if(now-first_tick>3000)
+            {
+                first_tick=now;
+                // led_toggle();
+                printf("IAP last err=%s(%u), state=%u, exp=%u, rx=%u, len=%u, stream=%u, q=%u, page=%u\r\n",
+                       uart_iap_debug_error_name(uart_iap_debug.code),
+                       uart_iap_debug.code,
+                       uart_iap_debug.state,
+                       uart_iap_debug.expected_blk,
+                       uart_iap_debug.rx_blk,
+                       uart_iap_debug.frame_len,
+                       uart_iap_debug.stream_len,
+                       uart_iap_debug.queue_count,
+                       uart_iap_debug.page_fill);
+            }
+        }
     }
 }
-
-

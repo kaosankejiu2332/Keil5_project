@@ -34,7 +34,7 @@
 
 
 /*────串口空闲中断缓存数组─────────────────────────────────*/
-#define UART0_RX_BUF_SIZE         2048
+#define UART0_RX_BUF_SIZE         4096
 #define UART0_RX_MAX              200//剩余最大空间
 #define URX_ptr_SIZE              10//记录10次收发
 

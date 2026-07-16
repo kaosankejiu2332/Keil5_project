@@ -4,7 +4,7 @@
 #include "my_gd25q32.h"
 #include <string.h>
 
-#define IAP_RAM_QUEUE_DEPTH   10U
+#define IAP_RAM_QUEUE_DEPTH   20U
 #define IAP_PACKET_DATA_LEN   128U
 #define IAP_PAGE_SIZE         256U
 
@@ -13,9 +13,13 @@ static uint8_t huancun[260] = {0};
 static uint8_t write_info[8] = {0};
 //接收到128有效数据包就存储起来
 static uint8_t payload_queue[IAP_RAM_QUEUE_DEPTH][IAP_PACKET_DATA_LEN] = {0};
+//下一个要取出的位置
 static uint8_t payload_queue_head = 0;
+//下一个要写入的位置
 static uint8_t payload_queue_tail = 0;
+//还没被处理的个数
 static uint8_t payload_queue_count = 0;
+//huancun数组里有多少个字节
 static uint16_t page_fill = 0;
 static uint8_t eot_pending = 0;
 static uint32_t frame_size = 0;
@@ -25,7 +29,37 @@ static uint32_t last_packet_tick = 0;
 static uint32_t write_addr = GD25Q32_UPDATE_ADDR;
 static uint32_t erase_ahead_addr = GD25Q32_UPDATE_ADDR;
 static uint8_t expected_blk = 1;
+static uint8_t xmodem_packet[133] = {0};
+static uint16_t xmodem_packet_len = 0;
+static uint8_t xmodem_collecting = 0;
+static uint32_t xmodem_stream_tick = 0;
+volatile IAP_DebugInfo uart_iap_debug = {0};
 IAP_status uart_iap;
+
+static void uart_iap_debug_clear(void)
+{
+    memset((void *)&uart_iap_debug, 0, sizeof(uart_iap_debug));
+}
+
+static void uart_iap_debug_set(uint8_t code, uint16_t frame_len, uint8_t rx_blk)
+{
+    uart_iap_debug.code = code;
+    uart_iap_debug.state = uart_iap.sta_flag;
+    uart_iap_debug.expected_blk = expected_blk;
+    uart_iap_debug.rx_blk = rx_blk;
+    uart_iap_debug.frame_len = frame_len;
+    uart_iap_debug.stream_len = xmodem_packet_len;
+    uart_iap_debug.queue_count = payload_queue_count;
+    uart_iap_debug.page_fill = page_fill;
+}
+
+static void uart_iap_reset_stream_state(void)
+{
+    memset(xmodem_packet, 0, sizeof(xmodem_packet));
+    xmodem_packet_len = 0;
+    xmodem_collecting = 0;
+    xmodem_stream_tick = 0;
+}
 
 static uint8_t strstr_hex(uint8_t *buf, uint16_t buf_len,
                           const char *sub, uint8_t sub_len)
@@ -59,6 +93,7 @@ static void uart_iap_reset_transfer_state(void)
     payload_queue_count = 0;
     page_fill = 0;
     eot_pending = 0;
+    uart_iap_reset_stream_state();
 
     frame_size = 0;
     next = 0;
@@ -77,13 +112,15 @@ static void uart_iap_enter_idle(void)
     uart_iap.sta_flag = IAP_FLAG_IDLE;
 }
 
+//判断队列里面有空槽，还可以写入.缓冲区数据放入队列
 static uint8_t uart_iap_queue_push(uint8_t *payload)
 {   
-    //如果队列满了，则不接收。队列设置10个包
+    //如果当前队列里已经堆满了 10 个未处理包，就不允许再写新的包。
     if(payload_queue_count >= IAP_RAM_QUEUE_DEPTH) {
         return 0;
     }
 
+    //有空槽
     memcpy(payload_queue[payload_queue_tail], payload, IAP_PACKET_DATA_LEN);
     payload_queue_tail++;
     if(payload_queue_tail >= IAP_RAM_QUEUE_DEPTH) {
@@ -94,6 +131,7 @@ static uint8_t uart_iap_queue_push(uint8_t *payload)
     return 1;
 }
 
+//把队列某个数据包拷贝到huancun
 static uint8_t uart_iap_queue_pop(uint8_t *payload)
 {
     if(payload_queue_count == 0) {
@@ -115,6 +153,8 @@ static uint32_t uart_iap_buffered_bytes(void)
     return ((uint32_t)payload_queue_count * IAP_PACKET_DATA_LEN) + (uint32_t)page_fill;
 }
 
+
+//发应答位
 static void uart_iap_accept_packet(void)
 {
     next = get_tick();
@@ -125,6 +165,110 @@ static void uart_iap_accept_packet(void)
     uart_iap.sta_flag = IAP_FLAG_RECEIVING;
 }
 
+static void uart_iap_process_packet(void)
+{
+    if((xmodem_packet[1] + xmodem_packet[2]) != 0xff) {
+        uart_iap_debug_set(IAP_ERR_HDR_SUM, sizeof(xmodem_packet), xmodem_packet[1]);
+        uart0_send_byte(0x15);
+        return;
+    }
+
+    if(uart_iap.sta_flag == IAP_FLAG_HANDSHAKE) {
+        if(xmodem_packet[1] == expected_blk) {
+            if(Xmode_CRC16(xmodem_packet + 3, 128) == ((uint16_t)xmodem_packet[131] << 8 | xmodem_packet[132])) {
+                if(uart_iap_queue_push(xmodem_packet + 3)) {
+                    uart_iap_accept_packet();
+                } else {
+                    uart_iap_debug_set(IAP_ERR_HANDSHAKE_QUEUE, sizeof(xmodem_packet), xmodem_packet[1]);
+                    uart0_send_byte(0x15);
+                }
+            } else {
+                uart_iap_debug_set(IAP_ERR_HANDSHAKE_CRC, sizeof(xmodem_packet), xmodem_packet[1]);
+                uart0_send_byte(0x15);
+            }
+        } else {
+            uart_iap_debug_set(IAP_ERR_HANDSHAKE_BLK, sizeof(xmodem_packet), xmodem_packet[1]);
+            uart0_send_byte(0x15);
+        }
+    } else if(uart_iap.sta_flag == IAP_FLAG_RECEIVING) {
+        if(xmodem_packet[1] == expected_blk) {
+            if(Xmode_CRC16(xmodem_packet + 3, 128) == ((uint16_t)xmodem_packet[131] << 8 | xmodem_packet[132])) {
+                if(uart_iap_queue_push(xmodem_packet + 3)) {
+                    uart_iap_accept_packet();
+                } else {
+                    uart_iap_debug_set(IAP_ERR_RECEIVE_QUEUE, sizeof(xmodem_packet), xmodem_packet[1]);
+                    uart0_send_byte(0x15);
+                }
+            } else {
+                uart_iap_debug_set(IAP_ERR_RECEIVE_CRC, sizeof(xmodem_packet), xmodem_packet[1]);
+                uart0_send_byte(0x15);
+            }
+        } else if(xmodem_packet[1] == (uint8_t)(expected_blk - 1)) {
+            last_packet_tick = get_tick();
+            uart0_send_byte(0x06);//重发数据包
+        } else {
+            uart_iap_debug_set(IAP_ERR_RECEIVE_BLK, sizeof(xmodem_packet), xmodem_packet[1]);
+            uart0_send_byte(0x15);
+        }
+    }
+}
+
+static void uart_iap_feed_stream(uint8_t *data, uint16_t len)
+{
+    uint16_t i;
+    uint8_t resync_on_new_soh;
+
+    resync_on_new_soh = (uint8_t)((xmodem_collecting != 0U) && (xmodem_packet_len > 0U) &&
+                                  (len > 0U) && (data[0] == 0x01U));
+    if(resync_on_new_soh != 0U) {
+        uart_iap_debug_set(IAP_ERR_STREAM_RESYNC, len, data[0]);
+        uart_iap_reset_stream_state();
+    }
+
+    for(i = 0; i < len; i++) {
+        if(xmodem_collecting == 0U) {
+            if(data[i] == 0x01U) {
+                xmodem_collecting = 1;
+                xmodem_packet_len = 0;
+                xmodem_packet[xmodem_packet_len++] = data[i];
+                xmodem_stream_tick = get_tick();
+            } else if((uart_iap.sta_flag == IAP_FLAG_RECEIVING) && (data[i] == 0x04U)) {
+                last_packet_tick = get_tick();
+                eot_pending = 1;
+                xmodem_stream_tick = 0;
+            } else if(uart_iap.sta_flag == IAP_FLAG_RECEIVING) {
+                uart_iap_debug_set(IAP_ERR_STREAM_NOISE, len, data[i]);
+                uart0_send_byte(0x15);
+            }
+        } else {
+            xmodem_packet[xmodem_packet_len++] = data[i];
+            xmodem_stream_tick = get_tick();
+            if(xmodem_packet_len >= sizeof(xmodem_packet)) {
+                xmodem_collecting = 0;
+                xmodem_packet_len = 0;
+                xmodem_stream_tick = 0;
+                uart_iap_process_packet();
+            }
+        }
+    }
+}
+
+static uint8_t uart_iap_handle_stream_timeout(uint32_t now)
+{
+    if((xmodem_collecting != 0U) && (xmodem_stream_tick != 0U) &&
+       ((now - xmodem_stream_tick) > IAP_STREAM_TIMEOUT_MS)) {
+        uart_iap_debug_set(IAP_ERR_STREAM_TIMEOUT, 0, 0);
+        uart_iap_reset_stream_state();
+        if(uart_iap.sta_flag == IAP_FLAG_RECEIVING) {
+            uart0_send_byte(0x15);
+        }
+        return 1U;
+    }
+
+    return 0U;
+}
+
+//队列拷贝到huancun从huancun写gd25q32
 static void uart_iap_storage_poll(void)
 {
     uint32_t buffered_bytes;
@@ -134,10 +278,11 @@ static void uart_iap_storage_poll(void)
     }
     //把两个数据包合并成256
     while((page_fill + IAP_PACKET_DATA_LEN) <= IAP_PAGE_SIZE) {
+        //队列里没有需要处理的数据包
         if(payload_queue_count == 0) {
             break;
         }
-
+        //队列数据拷贝进huancun
         uart_iap_queue_pop(&huancun[page_fill]);
         page_fill += IAP_PACKET_DATA_LEN;
 
@@ -183,6 +328,7 @@ static void uart_iap_storage_poll(void)
 void uart_iap_init(void)
 {
     uart_iap_reset_transfer_state();
+    uart_iap_debug_clear();
 
     uart_iap.delay_count = 0;
     uart_iap.delay_flag = 0;
@@ -215,7 +361,7 @@ void uart0_rx_flush(void)
     urx.overflow_count = 0;
     urx.dma_on_drop_buf = 0;
 
-    //关闭DMA在发送'C'前。不会出现数据在DMA关闭期间就传输过来
+    //关闭DMA。在发送'C'前。不会出现数据在DMA关闭期间就传输过来
     dma_memory_address_config(DEBUG_UART_DMA, DEBUG_UART_DMA_CH,
                               DMA_MEMORY_0, (uint32_t)&URX_BUFF[0]);
     dma_transfer_number_config(DEBUG_UART_DMA, DEBUG_UART_DMA_CH, uart0_dma_buf_size);
@@ -235,59 +381,14 @@ void uart_iap_feed(uint8_t *data, uint16_t len)
         if(strstr_hex(data, len, "update", 6)) {
             uart0_rx_flush();//每次收到upadate 清除缓冲区
             uart_iap_reset_transfer_state();
+            uart_iap_debug_clear();
             uart_iap.sta_flag = IAP_FLAG_HANDSHAKE;
             handshake_start = get_tick();
             next = handshake_start;
             uart0_send_byte('C');
         }
-    } else if(uart_iap.sta_flag == IAP_FLAG_HANDSHAKE) {
-        if(*data == 0x01) {
-            if((len == 133) && (data[1] + data[2] == 0xff)) {
-                if(data[1] == expected_blk) {
-                    if(Xmode_CRC16(data + 3, 128) == ((uint16_t)data[131] << 8 | data[132])) {
-                        if(uart_iap_queue_push(data + 3)) {
-                            uart_iap_accept_packet();
-                        } else {
-                            uart0_send_byte(0x15);
-                        }
-                    } else {
-                        uart0_send_byte(0x15);
-                    }
-                } else {
-                    uart0_send_byte(0x15);
-                }
-            } else {
-                uart0_send_byte(0x15);
-            }
-        }
-    } else if(uart_iap.sta_flag == IAP_FLAG_RECEIVING) {
-        if(*data == 0x01) {
-            if((len == 133) && (data[1] + data[2] == 0xff)) {
-                if(data[1] == expected_blk) {
-                    if(Xmode_CRC16(data + 3, 128) == ((uint16_t)data[131] << 8 | data[132])) {
-                        if(uart_iap_queue_push(data + 3)) {
-                            uart_iap_accept_packet();
-                        } else {
-                            uart0_send_byte(0x15);
-                        }
-                    } else {
-                        uart0_send_byte(0x15);
-                    }
-                } else if(data[1] == (uint8_t)(expected_blk - 1)) {
-                    last_packet_tick = get_tick();
-                    uart0_send_byte(0x06);//重发数据包
-                } else {
-                    uart0_send_byte(0x15);
-                }
-            } else {
-                uart0_send_byte(0x15);
-            }
-        } else if(*data == 0x04) {
-            last_packet_tick = get_tick();
-            eot_pending = 1;
-        } else {
-            uart0_send_byte(0x15);
-        }
+    } else if((uart_iap.sta_flag == IAP_FLAG_HANDSHAKE) || (uart_iap.sta_flag == IAP_FLAG_RECEIVING)) {
+        uart_iap_feed_stream(data, len);
     }
 }
 
@@ -297,19 +398,26 @@ void uart_iap_poll(void)
 
     if(uart_iap.sta_flag == IAP_FLAG_HANDSHAKE) {
         now = get_tick();
-        if(now - handshake_start > 15000) {
+        if(uart_iap_handle_stream_timeout(now) != 0U) {
+            next = now;
+            uart0_send_byte('C');
+        } else if(now - handshake_start > IAP_HANDSHAKE_TIMEOUT_MS) {
+            uart_iap_debug_set(IAP_ERR_HANDSHAKE_TIMEOUT, 0, 0);
             uart0_rx_flush();
             uart_iap_enter_idle();
-        } else if(now - next > 1000) {
+        } else if((xmodem_collecting == 0U) && (now - next > 1000U)) {
             uart0_send_byte('C');
             next = now;
         }
     } else if(uart_iap.sta_flag == IAP_FLAG_RECEIVING) {
-        uart_iap_storage_poll();
+        now = get_tick();
+        if(uart_iap_handle_stream_timeout(now) == 0U) {
+            uart_iap_storage_poll();
+        }
 
         if(eot_pending == 0U) {
-            now = get_tick();
-            if(now - last_packet_tick > 3000) {
+            if(now - last_packet_tick > IAP_RECEIVE_TIMEOUT_MS) {
+                uart_iap_debug_set(IAP_ERR_RECEIVE_TIMEOUT, 0, 0);
                 uart0_rx_flush();
                 uart_iap_enter_idle();
             }
@@ -328,6 +436,40 @@ void uart_iap_poll(void)
         gd25q32_page_program(GD25Q32_INFO_ADDR, write_info, 8);
         delay_ms(100);
         NVIC_SystemReset();
+    }
+}
+
+const char *uart_iap_debug_error_name(uint8_t code)
+{
+    switch(code) {
+    case IAP_ERR_NONE:
+        return "none";
+    case IAP_ERR_HDR_SUM:
+        return "hdr_sum";
+    case IAP_ERR_HANDSHAKE_BLK:
+        return "hs_blk";
+    case IAP_ERR_HANDSHAKE_CRC:
+        return "hs_crc";
+    case IAP_ERR_HANDSHAKE_QUEUE:
+        return "hs_queue";
+    case IAP_ERR_RECEIVE_CRC:
+        return "rx_crc";
+    case IAP_ERR_RECEIVE_QUEUE:
+        return "rx_queue";
+    case IAP_ERR_RECEIVE_BLK:
+        return "rx_blk";
+    case IAP_ERR_STREAM_NOISE:
+        return "stream_noise";
+    case IAP_ERR_HANDSHAKE_TIMEOUT:
+        return "hs_timeout";
+    case IAP_ERR_RECEIVE_TIMEOUT:
+        return "rx_timeout";
+    case IAP_ERR_STREAM_TIMEOUT:
+        return "stream_timeout";
+    case IAP_ERR_STREAM_RESYNC:
+        return "stream_resync";
+    default:
+        return "unknown";
     }
 }
 
