@@ -89,18 +89,10 @@ int main(void)
             if(now-first_tick>3000)
             {
                 first_tick=now;
-                // led_toggle();
-                printf("IAP last err=%s(%u), state=%u, exp=%u, rx=%u, len=%u, stream=%u, q=%u, page=%u\r\n",
-                       uart_iap_debug_error_name(uart_iap_debug.code),
-                       uart_iap_debug.code,
-                       uart_iap_debug.state,
-                       uart_iap_debug.expected_blk,
-                       uart_iap_debug.rx_blk,
-                       uart_iap_debug.frame_len,
-                       uart_iap_debug.stream_len,
-                       uart_iap_debug.queue_count,
-                       uart_iap_debug.page_fill);
+                led_toggle();
+                printf("hello\r\n");
             }
         }
     }
 }
+
