@@ -61,17 +61,16 @@
 
 /* function declarations */
 uint32_t gd25q32_read_jedec_id(void);
-void gd25q32_write_enable(void);
-void gd25q32_wait_busy(void);
-void gd25q32_erase_sector(uint32_t addr);
-void gd25q32_erase_block_64k(uint32_t addr);
-void gd25q32_erase_chip(void);
-void gd25q32_page_program(uint32_t addr, uint8_t *data, uint16_t len);
+uint8_t gd25q32_write_enable(void);
+uint8_t gd25q32_wait_busy(void);
+uint8_t gd25q32_erase_sector(uint32_t addr);
+uint8_t gd25q32_erase_block_64k(uint32_t addr);
+uint8_t gd25q32_erase_chip(void);
+uint8_t gd25q32_page_program(uint32_t addr, const uint8_t *data, uint16_t len);
 void gd25q32_read_data(uint32_t addr, uint8_t *data, uint16_t len);
 
 
 void jump_to_app(uint32_t app_addr);
 
 #endif
-
 

@@ -1,6 +1,6 @@
 /*!
-    \file    main.c
-    \brief   led spark with systick
+    \file    gd32f4xx_it.h
+    \brief   the header file of the ISR
 
     \version 2026-02-05, V3.3.3, firmware for GD32F4xx
 */
@@ -32,65 +32,29 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 OF SUCH DAMAGE.
 */
 
+#ifndef GD32F4XX_IT_H
+#define GD32F4XX_IT_H
+
 #include "gd32f4xx.h"
-#include "systick.h"
-#include "main.h"
-#include "gd32f450i_eval.h"
-#include "my_uart.h"
-#include "my_spi.h"
-#include "uart_iap.h"
-#include <stdio.h>
 
-/*!
-    \brief    main function
-    \param[in]  none
-    \param[out] none
-    \retval     none
-*/
-int main(void)
-{
-    static uint8_t rx_data[512];
-    uint32_t receive_len;
-    uint32_t now = 0, first_tick = 0;
+/* function declarations */
+/* this function handles NMI exception */
+void NMI_Handler(void);
+/* this function handles HardFault exception */
+void HardFault_Handler(void);
+/* this function handles MemManage exception */
+void MemManage_Handler(void);
+/* this function handles BusFault exception */
+void BusFault_Handler(void);
+/* this function handles UsageFault exception */
+void UsageFault_Handler(void);
+/* this function handles SVC exception */
+void SVC_Handler(void);
+/* this function handles DebugMon exception */
+void DebugMon_Handler(void);
+/* this function handles PendSV exception */
+void PendSV_Handler(void);
+/* this function handles SysTick exception */
+void SysTick_Handler(void);
 
-    systick_config_ms();
-    uart0_init();
-    uart0_dma_rx_init();
-    led_init();
-    spi1_init();
-    uart_iap_init();
-
-    SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
-    while(1) {
-        uint8_t rx_error = uart0_rx_get_error();
-
-        if(rx_error != UART0_RX_ERROR_NONE) {
-            if((rx_error & UART0_RX_ERROR_OVERFLOW) != 0U) {
-                uart_iap_abort(IAP_ERROR_OVERFLOW);
-            } else {
-                uart_iap_abort(IAP_ERROR_UART);
-            }
-        }
-
-        while((receive_len = uart0_rx_read(rx_data, sizeof(rx_data))) > 0U) {
-            uart_iap_feed(rx_data, receive_len);
-            if((uart_iap.sta_flag == IAP_FLAG_DONE) ||
-               (uart_iap.sta_flag == IAP_FLAG_ERROR)) {
-                break;
-            }
-        }
-
-        uart_iap_poll();
-        if(uart_iap.sta_flag == IAP_FLAG_IDLE) {
-            now = get_tick();
-            if(now - first_tick > 3000) {
-                first_tick = now;
-                led_toggle();
-                printf("ok\r\n");
-            }
-        }
-    }
-}
-
-
-
+#endif /* GD32F4XX_IT_H */

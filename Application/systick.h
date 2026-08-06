@@ -1,6 +1,6 @@
 /*!
-    \file    main.c
-    \brief   led spark with systick
+    \file    systick.h
+    \brief   the header file of systick
 
     \version 2026-02-05, V3.3.3, firmware for GD32F4xx
 */
@@ -32,65 +32,18 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 OF SUCH DAMAGE.
 */
 
-#include "gd32f4xx.h"
-#include "systick.h"
-#include "main.h"
-#include "gd32f450i_eval.h"
-#include "my_uart.h"
-#include "my_spi.h"
-#include "uart_iap.h"
-#include <stdio.h>
+#ifndef SYS_TICK_H
+#define SYS_TICK_H
 
-/*!
-    \brief    main function
-    \param[in]  none
-    \param[out] none
-    \retval     none
-*/
-int main(void)
-{
-    static uint8_t rx_data[512];
-    uint32_t receive_len;
-    uint32_t now = 0, first_tick = 0;
+#include <stdint.h>
 
-    systick_config_ms();
-    uart0_init();
-    uart0_dma_rx_init();
-    led_init();
-    spi1_init();
-    uart_iap_init();
-
-    SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
-    while(1) {
-        uint8_t rx_error = uart0_rx_get_error();
-
-        if(rx_error != UART0_RX_ERROR_NONE) {
-            if((rx_error & UART0_RX_ERROR_OVERFLOW) != 0U) {
-                uart_iap_abort(IAP_ERROR_OVERFLOW);
-            } else {
-                uart_iap_abort(IAP_ERROR_UART);
-            }
-        }
-
-        while((receive_len = uart0_rx_read(rx_data, sizeof(rx_data))) > 0U) {
-            uart_iap_feed(rx_data, receive_len);
-            if((uart_iap.sta_flag == IAP_FLAG_DONE) ||
-               (uart_iap.sta_flag == IAP_FLAG_ERROR)) {
-                break;
-            }
-        }
-
-        uart_iap_poll();
-        if(uart_iap.sta_flag == IAP_FLAG_IDLE) {
-            now = get_tick();
-            if(now - first_tick > 3000) {
-                first_tick = now;
-                led_toggle();
-                printf("ok\r\n");
-            }
-        }
-    }
-}
-
-
-
+/* configure systick */
+void systick_config_us(void);
+void systick_config_ms(void);
+/* delay a time in milliseconds */
+void delay_ms(uint32_t count);
+/* delay decrement */
+void delay_decrement(void);
+void delay_us(uint32_t count);
+uint32_t get_tick(void);
+#endif /* SYS_TICK_H */

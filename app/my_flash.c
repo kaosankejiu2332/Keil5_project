@@ -2,100 +2,93 @@
 #include "gd32f4xx_fmc.h"
 #include "my_gd25q32.h"
 #include "boot.h"
-#include <string.h>   // memset
-#include <stdio.h>    // printf
-#include "systick.h"
 
-/*
- * 擦除内部FLASH的扇区       
- */
-void flash_sector_erase(void)
-{	uint32_t i;
-	for(i = APP_START_ADDR; i < 0X08100000; i+= 0x20000){
-		uint32_t sector;
-		if(i < 0x08040000){
-			sector = CTL_SECTOR_NUMBER_5;
-		}else if(i < 0x08060000){
-			sector = CTL_SECTOR_NUMBER_6;
-		}else if(i < 0x08080000){
-			sector = CTL_SECTOR_NUMBER_7;
-		}else if(i < 0x080A0000){
-			sector = CTL_SECTOR_NUMBER_8;
-		}else if(i < 0x080C0000){
-			sector = CTL_SECTOR_NUMBER_9;
-		}else if(i < 0X080E0000){
-			sector = CTL_SECTOR_NUMBER_10;
-		}else {
-			sector = CTL_SECTOR_NUMBER_11;
-		}
-		fmc_sector_erase(sector);
-		}
+#define APP_FLASH_SECTOR_SIZE  0x00020000UL
+#define COPY_BUFFER_SIZE       512U
+
+static const uint32_t app_sectors[] = {
+    CTL_SECTOR_NUMBER_5,
+    CTL_SECTOR_NUMBER_6,
+    CTL_SECTOR_NUMBER_7,
+    CTL_SECTOR_NUMBER_8,
+    CTL_SECTOR_NUMBER_9,
+    CTL_SECTOR_NUMBER_10,
+    CTL_SECTOR_NUMBER_11
+};
+
+uint8_t flash_sector_erase(uint32_t firmware_size)
+{
+    uint32_t sector_count;
+    uint32_t index;
+
+    if((firmware_size == 0U) || (firmware_size > APP_MAX_SIZE)) {
+        return 0U;
+    }
+
+    sector_count = (firmware_size + APP_FLASH_SECTOR_SIZE - 1U)
+                   / APP_FLASH_SECTOR_SIZE;
+    if(sector_count > (sizeof(app_sectors) / sizeof(app_sectors[0]))) {
+        return 0U;
+    }
+
+    for(index = 0U; index < sector_count; index++) {
+        if(FMC_READY != fmc_sector_erase(app_sectors[index])) {
+            return 0U;
+        }
+    }
+    return 1U;
 }
 
-/*
- * 注：调用前先执行擦除APP区
- * GD25Q32中的数据写入MCU Flash
- * 参数: firmware_size  - 记录的文件大小
- *        
- */
+uint8_t flash_update_data(uint32_t firmware_size)
+{
+    static uint8_t data[COPY_BUFFER_SIZE];
+    uint32_t offset = 0U;
 
-void flash_update_data(uint32_t firmware_size)//参数传记录的文件大小
-{	
-	uint32_t i;
-	uint16_t j;
+    if((firmware_size == 0U) || (firmware_size > APP_MAX_SIZE)) {
+        return 0U;
+    }
 
-	//先解锁
-	static uint8_t data[520];  //static 把数组从栈移到全局数据段，不怕压栈
-	//假设固件大小为128KB
+    while(offset < firmware_size) {
+        uint32_t remaining = firmware_size - offset;
+        uint16_t read_len = (remaining > COPY_BUFFER_SIZE)
+                            ? COPY_BUFFER_SIZE
+                            : (uint16_t)remaining;
+        uint16_t index = 0U;
 
+        gd25q32_read_data(GD25Q32_UPDATE_ADDR + offset, data, read_len);
 
-	
-	if(firmware_size % 4 == 0 )
-	{	
-		//firmware_size是4的整数倍但不能确保是512的整数倍
-		
+        while((uint16_t)(index + 4U) <= read_len) {
+            uint32_t word = ((uint32_t)data[index])
+                            | ((uint32_t)data[index + 1U] << 8)
+                            | ((uint32_t)data[index + 2U] << 16)
+                            | ((uint32_t)data[index + 3U] << 24);
 
+            if(FMC_READY != fmc_word_program(APP_START_ADDR + offset + index,
+                                             word)) {
+                return 0U;
+            }
+            index = (uint16_t)(index + 4U);
+        }
 
-		//先把512字节整数倍的个数写入
-		for(i = 0; i < firmware_size/512; i ++)//假设的一次性取512字节
-		{
-		
-		gd25q32_read_data((uint32_t)GD25Q32_UPDATE_ADDR + i*512,data , 512);
-		
-		for(j=0;j < 512; j += 4 )
-		{
-			uint32_t word=*(uint32_t *)(&data[j]);//一次性取4字节
-			fmc_word_program(APP_START_ADDR + i*512 + j, word);//4个字节写入
-		}
+        if(index < read_len) {
+            uint32_t word = 0xFFFFFFFFUL;
+            uint8_t tail_index = 0U;
 
+            while(index < read_len) {
+                word &= ~(0xFFUL << (tail_index * 8U));
+                word |= (uint32_t)data[index] << (tail_index * 8U);
+                index++;
+                tail_index++;
+            }
 
-		}
+            if(FMC_READY != fmc_word_program(APP_START_ADDR + offset
+                                             + (read_len & ~3U), word)) {
+                return 0U;
+            }
+        }
 
-		memset(data,0,512);//数组清零，后续把数据读到data填不满512字节
-		//再把剩余字节个数写入，不是512倍数但一定是4倍数。最前面的判断
-		if(firmware_size % 512 != 0)
-		{
-		gd25q32_read_data((uint32_t)GD25Q32_UPDATE_ADDR + i*512,data ,
-		firmware_size % 512);
-		for(j=0;j < firmware_size % 512; j += 4 )
-		{
-			uint32_t word=*(uint32_t *)(&data[j]);//一次性取4字节
-			fmc_word_program(APP_START_ADDR + i*512 + j, word);//4个字节写入
-		}
-		}
-		
-		
+        offset += read_len;
+    }
 
-	}else
-	{	
-		fmc_lock();
-		while(1)
-		{
-			printf("firmware size error\r\n");
-			delay_ms(500);
-		}
-		
-	}
-
+    return 1U;
 }
-
